@@ -1,0 +1,4 @@
+[submodule "spdlog"]
+	path = spdlog
+	url = https://github.com/gabime/spdlog/tree/v1.12.0
+	branch = v1.12.0
