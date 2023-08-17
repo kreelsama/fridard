@@ -1,4 +1,4 @@
-# mfrida
+# fridard
 
 ## Compile
 
@@ -9,6 +9,7 @@
 * You can use `npm install --save @types/frida-gum` to enable syntax highlighting when writing rule files
 
 Use latest visual studio to open `.sln` to compile.
+The compiled binary is "mfrida.exe".
 
 ## Usage
 
