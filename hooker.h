@@ -19,9 +19,11 @@ struct injection_instance
 	string ts;
 	FridaSession* session = nullptr;
 	FridaScript* script = nullptr;
-	~injection_instance()
+	bool to_reattach = false;
+
+	void detach()
 	{
-		if (script) 
+		if (script)
 		{
 			frida_script_unload_sync(script, nullptr, nullptr);
 			frida_unref(script);
@@ -34,6 +36,11 @@ struct injection_instance
 		}
 		script = nullptr;
 		session = nullptr;
+	}
+
+	~injection_instance()
+	{
+		detach();
 	}
 };
 
@@ -53,13 +60,15 @@ public:
 	~Injector();
 
 	void on_session_detach(
-		FridaSession* session,
+		const FridaSession* session,
 		FridaSessionDetachReason reason,
 		FridaCrash* crash
 	);
-	void on_message(FridaScript* script, const gchar* message, GBytes* data);
+	static void on_message(FridaScript* script, const gchar* message, GBytes* data);
 	void terminate();
 	void update();
+
+	void reattach(const pid_t pid, const string& ts);
 
 private:
 	FridaDevice* local_device = nullptr;
@@ -69,5 +78,5 @@ private:
 
 	std::mutex list_lock;
 	list<injection_instance> injectors;
-	int remove_injector_by_session(FridaSession* session);
+	int remove_injector_by_session(const FridaSession* session);
 };

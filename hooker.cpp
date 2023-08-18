@@ -61,14 +61,18 @@ int Injector::init() {
 
 void Injector::append(const pid_t pid, const string& ts)
 {
+    list_lock.lock();
     // to be injected
-    if(!query(pid))
-	    injectors.push_back({ pid, ts, nullptr, nullptr });
+    if (!query(pid)) {
+        injectors.push_back({ pid, ts, nullptr, nullptr, false});
+    }
+    list_lock.unlock();
 }
 
 void Injector::attach()
 {
     GError* error;
+    decltype(injectors) reattach_processes;
     list_lock.lock();
     for (auto&& injector = injectors.begin(); injector != injectors.end(); /*increment inside*/) 
     {
@@ -82,14 +86,21 @@ void Injector::attach()
         //      x = list.begin;
         //      x = list.erase(x); /*erase will return spawn next iter on return*/
         // No more x++ needed;
-        if (injector->session) {
+        error = nullptr;
+        const pid_t target_pid = injector->pid;
+        string& ts = injector->ts;
+
+        if (injector->to_reattach)
+        {
+            goto attach_failed;
+        }
+
+        if (injector->session) 
+        {
             ++ injector;
             continue;
         }
-        error = nullptr;
-        const pid_t target_pid = injector->pid;
-
-        string& ts = injector->ts;
+        LOGD("tring to attach PID={}", target_pid);
 
         injector->session = frida_device_attach_sync(local_device, target_pid, nullptr, nullptr, &error);
         if(error) 
@@ -111,26 +122,34 @@ void Injector::attach()
 
         ++injector;
         continue;
+
 	attach_failed:
-        LOGW("Failed to attach PID={} : {}", target_pid, error->message);
-        g_error_free(error);
-        // cleanup will be automatically performed
-        injector = injectors.erase(injector);
+        if (!injector->to_reattach) 
+        {
+            LOGW("Failed to attach PID={} : {}", target_pid, error->message);
+            g_error_free(error);
+            // cleanup will be automatically performed
+            injector = injectors.erase(injector);
+        }
+    	else
+        {
+            LOGI("Reattaching process PID={}", target_pid);
+            // NOT incrementing the iter on purpose, letting it to inject again
+            injector->detach();
+            injector->to_reattach = false;
+        }
     }
     list_lock.unlock();
 }
 
 int Injector::query(const pid_t pid)
 {
-    list_lock.lock();
-    for (auto injector = injectors.begin(); injector != injectors.end(); ++injector)
+    for (const auto& injector : injectors)
     {
-        if (injector->pid == pid) {
-            list_lock.unlock();
+        if (injector.pid == pid) {
             return true;
         }
     }
-    list_lock.unlock();
     return false;
 }
 
@@ -165,7 +184,28 @@ void Injector::update()
     need_update = false;
 }
 
-int Injector::remove_injector_by_session(FridaSession* session)
+void Injector::reattach(const pid_t pid, const string& ts)
+{
+    list_lock.lock();
+    if (!query(pid)) {
+        LOGW("Process with PID={} has no injection instance, attaching now.", pid);
+        injectors.push_back( {pid, ts, nullptr, nullptr, false} );
+    }
+    else
+    {
+        for (auto&& injector = injectors.begin(); injector != injectors.end(); ++injector)
+        {
+	        if(injector->pid == pid)
+	        {
+                injector->to_reattach = true;
+                break;
+	        }
+        }
+    }
+    list_lock.unlock();
+}
+
+int Injector::remove_injector_by_session(const FridaSession* session)
 {
     list_lock.lock();
     for (auto injector = injectors.begin(); injector != injectors.end(); ++injector)
@@ -182,7 +222,7 @@ int Injector::remove_injector_by_session(FridaSession* session)
     return false;
 }
 
-void Injector::on_session_detach(FridaSession* session, FridaSessionDetachReason reason, FridaCrash* crash)
+void Injector::on_session_detach(const FridaSession* session, const FridaSessionDetachReason reason, FridaCrash* crash)
 {
 	gchar* reason_str = g_enum_to_string(FRIDA_TYPE_SESSION_DETACH_REASON, reason);
     LOGI("on_detached: reason = {}", reason_str);
@@ -197,20 +237,14 @@ void Injector::on_message(FridaScript* script,
     const gchar* message,
     GBytes* data)
 {
-    JsonParser* parser;
-    JsonObject* root;
-    const gchar* type;
+	JsonParser* parser = json_parser_new();
+    json_parser_load_from_data(parser, message, -1, nullptr);
+    JsonObject* root = json_node_get_object(json_parser_get_root(parser));
 
-    parser = json_parser_new();
-    json_parser_load_from_data(parser, message, -1, NULL);
-    root = json_node_get_object(json_parser_get_root(parser));
-
-    type = json_object_get_string_member(root, "type");
+    const gchar* type = json_object_get_string_member(root, "type");
     if (strcmp(type, "log") == 0)
     {
-        const gchar* log_message;
-
-        log_message = json_object_get_string_member(root, "payload");
+	    const gchar* log_message = json_object_get_string_member(root, "payload");
         g_print("%s\n", log_message);
     }
     else

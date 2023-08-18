@@ -77,7 +77,8 @@ int main(int argc, char *argv[])
     injector.attach();
 
     std::thread injecting(injection_begin, std::ref(injector));
-    
+
+    // perform injecting multiple processes
     for (auto&& pid : pids)
     {
         // Injecting with multi-threading
@@ -89,6 +90,20 @@ int main(int argc, char *argv[])
         signaled_to = INJECTOR;
         raise(SIGINT);
     }
+
+    // perform reattaching all processes
+    for (auto&& pid : pids)
+    {
+        // Injecting with multi-threading
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+
+        injector.reattach(pid, ts);
+        injector.need_update = true;
+
+        signaled_to = INJECTOR;
+        raise(SIGINT);
+    }
+
     if(injecting.joinable())
 	    injecting.join();
     
