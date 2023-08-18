@@ -92,7 +92,11 @@ void Injector::attach()
 
         if (injector->to_reattach)
         {
-            goto attach_failed;
+            LOGI("Reattaching process PID={}", target_pid);
+            // NOT incrementing the iter on purpose, letting it to inject again
+            injector->detach();
+            injector->to_reattach = false;
+            continue;
         }
 
         if (injector->session) 
@@ -100,6 +104,7 @@ void Injector::attach()
             ++ injector;
             continue;
         }
+
         LOGD("tring to attach PID={}", target_pid);
 
         injector->session = frida_device_attach_sync(local_device, target_pid, nullptr, nullptr, &error);
@@ -124,20 +129,10 @@ void Injector::attach()
         continue;
 
 	attach_failed:
-        if (!injector->to_reattach) 
-        {
-            LOGW("Failed to attach PID={} : {}", target_pid, error->message);
-            g_error_free(error);
-            // cleanup will be automatically performed
-            injector = injectors.erase(injector);
-        }
-    	else
-        {
-            LOGI("Reattaching process PID={}", target_pid);
-            // NOT incrementing the iter on purpose, letting it to inject again
-            injector->detach();
-            injector->to_reattach = false;
-        }
+        LOGW("Failed to attach PID={} : {}", target_pid, error->message);
+        g_error_free(error);
+        // cleanup will be automatically performed
+        injector = injectors.erase(injector);
     }
     list_lock.unlock();
 }
