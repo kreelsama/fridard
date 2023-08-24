@@ -203,7 +203,7 @@ void Injector::reattach(const pid_t pid, const string& ts)
 int Injector::remove_injector_by_session(const FridaSession* session)
 {
     list_lock.lock();
-    for (auto injector = injectors.begin(); injector != injectors.end(); ++injector)
+    for (auto&& injector = injectors.begin(); injector != injectors.end(); ++injector)
     {
 	    if (injector->session == session)
 	    {
@@ -242,9 +242,9 @@ void Injector::on_message(FridaScript* script,
 	    const gchar* log_message = json_object_get_string_member(root, "payload");
         g_print("%s\n", log_message);
     }
-    else
+    else // receive on Error
     {
-        g_print("on_message: %s\n", message);
+        LOGE("received error from script: {}", message);
     }
 
     g_object_unref(parser);

@@ -19,18 +19,29 @@ int signaled_to = 0;
 
 static std::string load_ts();
 
-void signal_handler(int signo)
+void sigint_handler(int signo)
 {
     // to ensure the subsequent SIGINT gets proper handling
-    signal(SIGINT, signal_handler);
-    if (signaled_to == INJECTOR) {
-        injector.update();
-        signaled_to = ELSE;
-    }
-    else {
+    if (signaled_to == ELSE)
+    {
+        // allow for forcibly terminating
         injector.terminate();
     }
+    else if (signaled_to == INJECTOR) {
+        signal(SIGINT, sigint_handler);
+        injector.update();
+    }
+    else {
+        LOGW("Got ambiguous signal, ignoring");
+    }
+    signaled_to = ELSE;
 }
+
+void sigabort_handler(int signo)
+{
+    exit(-1);
+}
+
 
 void injection_begin(const Injector& injector)
 {
@@ -67,7 +78,7 @@ int main(int argc, char *argv[])
         return WRONG_PARAM;
     }
     
-    signal(SIGINT, signal_handler);
+    signal(SIGINT, sigint_handler);
 
     if(injector.init())
     {
@@ -82,7 +93,7 @@ int main(int argc, char *argv[])
     for (auto&& pid : pids)
     {
         // Injecting with multi-threading
-	    std::this_thread::sleep_for(std::chrono::seconds(2));
+	    // std::this_thread::sleep_for(std::chrono::seconds(2));
 
         injector.append(pid, ts);
         injector.need_update = true;
@@ -92,21 +103,28 @@ int main(int argc, char *argv[])
     }
 
     // perform reattaching all processes
-    for (auto&& pid : pids)
-    {
-        // Injecting with multi-threading
-        std::this_thread::sleep_for(std::chrono::seconds(2));
+    //for (auto&& pid : pids)
+    //{
+    //    // Injecting with multi-threading
+    //    std::this_thread::sleep_for(std::chrono::seconds(2));
 
-        injector.reattach(pid, ts);
-        injector.need_update = true;
+    //    injector.reattach(pid, ts);
+    //    injector.need_update = true;
 
-        signaled_to = INJECTOR;
-        raise(SIGINT);
-    }
+    //    signaled_to = INJECTOR;
+    //    raise(SIGINT);
+    //}
 
     if(injecting.joinable())
 	    injecting.join();
-    
+    LOGI("quitting main program");
+
+    //signal(sigabrt, sigabort_handler);
+    //std::thread killer([]() {
+    //    std::this_thread::sleep_for(std::chrono::seconds(5));
+    //    execve("taskmgr");
+    //    });
+
 	return SUCCESS;
 }
 

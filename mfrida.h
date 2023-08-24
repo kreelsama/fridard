@@ -5,7 +5,7 @@
 #include "frida-core.h"
 #include "spdlog/spdlog.h"
 
-#define INSTRUMENT_TEMPLATE_PATH  "main.ts"
+#define INSTRUMENT_TEMPLATE_PATH  "main.js"
 
 #define USE_CONSOLE_LOGGER
 // #define USE_FILE_LOGGER
