@@ -305,7 +305,7 @@ Interceptor.attach(Module.getExportByName(WS2_LIB_NAME, 'sendto'), {
       desc.remote_addr = this.remote_address;
       desc.function = "sendto"
       transmitter(desc)
-      console.log(`send buf to ${this.remote_address}`, "data:", this.sendmsg);
+      // console.log(`send buf to ${this.remote_address}`, "data:", this.sendmsg);
     }
     else if (nBytes < 0){ 
       // send failed: socket crash unexpectedly
