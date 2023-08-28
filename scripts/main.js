@@ -8,6 +8,7 @@ let logger=console;
 
 var ushort_size = 0;
 
+
 const local_module = Module.load("D:\\Dev\\frida\\scripts\\ws2helper.dll");
 const get_addr_info = new NativeFunction(local_module.getExportByName("get_address_info"), 'int', ['pointer', 'pointer']);
 const get_addr_info_from_addrinfo = new NativeFunction(local_module.getExportByName("get_address_info_from_addrinfo"), 'int', ['pointer', 'pointer']);
