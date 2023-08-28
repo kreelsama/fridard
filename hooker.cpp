@@ -1,7 +1,13 @@
 #include "hooker.h"
-#include <iostream>
 
 extern logger_t logger;
+
+FridaDevice* device;
+
+FridaDevice* get_current_device()
+{
+    return device;
+}
 
 static void  on_detached_wrapper(
     FridaSession* session,
@@ -19,6 +25,13 @@ static void on_message_wrapper(FridaScript* script,
     gpointer user_data) {
     auto injector = reinterpret_cast<Injector*>(user_data);
     injector->on_message(script, message, data);
+}
+
+static void on_child_added_wrapper(FridaDevice* device, FridaChild* child_process, gpointer user_data)
+{
+    LOGD("Enter child created");
+    auto injector = reinterpret_cast<Injector*>(user_data);
+    injector->on_child_created(device, child_process);
 }
 
 int Injector::init() {
@@ -52,28 +65,31 @@ int Injector::init() {
     frida_script_options_set_runtime(options, FRIDA_SCRIPT_RUNTIME_QJS);
 
     loop = g_main_loop_new(nullptr, true);
-    
-	if (local_device)
-        return SUCCESS;
+
+    if (local_device) {
+        LOGI("Found local device");
+        g_signal_connect(local_device, "child-added", GCallback(on_child_added_wrapper), this);
+        device = local_device;
+    	return SUCCESS;
+    }
     else
         return NO_LOCAL_DEVICE;
 }
 
-void Injector::append(const pid_t pid, const string& ts)
+void Injector::append(const pid_t pid, const string& js, bool suspended)
 {
-    list_lock.lock();
+    std::lock_guard<std::mutex> lk(access_lock);
     // to be injected
     if (!query(pid)) {
-        injectors.push_back({ pid, ts, nullptr, nullptr, false});
+        injectors.push_back({ pid, js, nullptr, nullptr, false, suspended});
     }
-    list_lock.unlock();
 }
 
 void Injector::attach()
 {
     GError* error;
     decltype(injectors) reattach_processes;
-    list_lock.lock();
+    std::lock_guard<std::mutex> lk(access_lock);
     for (auto&& injector = injectors.begin(); injector != injectors.end(); /*increment inside*/) 
     {
         // reason for incrementing inside:
@@ -110,10 +126,13 @@ void Injector::attach()
         injector->session = frida_device_attach_sync(local_device, target_pid, nullptr, nullptr, &error);
         if(error) 
             goto attach_failed;
+
+        frida_session_enable_child_gating(injector->session, nullptr, nullptr, nullptr);
         
         injector->script = frida_session_create_script_sync(injector->session, ts.c_str(), options, nullptr, &error);
         if(error)
             goto attach_failed;
+
         g_signal_connect(injector->script, "message", G_CALLBACK(on_message_wrapper), this);
 
         frida_script_load_sync(injector->script, nullptr, &error);
@@ -125,6 +144,12 @@ void Injector::attach()
 
         LOGI("PID={} attached", target_pid);
 
+        if(injector->suspended)
+        {   // resume execution
+            frida_device_resume(local_device, target_pid, nullptr, nullptr, nullptr);
+            injector->suspended = false;
+        }
+
         ++injector;
         continue;
 
@@ -134,7 +159,6 @@ void Injector::attach()
         // cleanup will be automatically performed
         injector = injectors.erase(injector);
     }
-    list_lock.unlock();
 }
 
 int Injector::query(const pid_t pid)
@@ -157,6 +181,7 @@ void Injector::event_loop() const
 Injector::~Injector() {
     GError* error = nullptr;
     frida_unref(local_device);
+    device = nullptr;
     frida_device_manager_close_sync(device_manager, nullptr, &error);
     frida_unref(device_manager);
     if (error) {
@@ -174,6 +199,7 @@ void Injector::update()
     if (!need_update) {
     	return;
     }
+    LOGD("updating injector list");
 	// Here we assume new pid/ts has been placed in injector list
     attach();
     need_update = false;
@@ -181,10 +207,10 @@ void Injector::update()
 
 void Injector::reattach(const pid_t pid, const string& ts)
 {
-    list_lock.lock();
+    std::lock_guard<std::mutex> lk(access_lock);
     if (!query(pid)) {
         LOGW("Process with PID={} has no injection instance, attaching now.", pid);
-        injectors.push_back( {pid, ts, nullptr, nullptr, false} );
+        injectors.push_back( {pid, ts, nullptr, nullptr, false, false} );
     }
     else
     {
@@ -197,27 +223,49 @@ void Injector::reattach(const pid_t pid, const string& ts)
 	        }
         }
     }
-    list_lock.unlock();
 }
 
 int Injector::remove_injector_by_session(const FridaSession* session)
 {
-    list_lock.lock();
+    std::lock_guard<std::mutex> lk(access_lock);
     for (auto&& injector = injectors.begin(); injector != injectors.end(); ++injector)
     {
 	    if (injector->session == session)
 	    {
-            LOGI("Injector for PID={} detached", injector->pid);
             injectors.erase(injector);
-            list_lock.unlock();
+            LOGI("Injector for PID={} detached", injector->pid);
             return true;
 	    }
     }
-    list_lock.unlock();
     return false;
 }
 
-void Injector::on_session_detach(const FridaSession* session, const FridaSessionDetachReason reason, FridaCrash* crash)
+void Injector::on_child_created(FridaDevice* device, FridaChild* child)
+{
+    const pid_t pid = frida_child_get_pid(child);
+    const pid_t ppid = frida_child_get_parent_pid(child);
+    gint argc;
+    gchar** argv = frida_child_get_argv(child, &argc);
+    const gchar* path = frida_child_get_path(child);
+
+    auto desc = new_pid_desc(pid, ppid, argc, (const char**) argv, path);
+
+    string js = get_rule_from_pid_desc(desc);
+
+    if(js.empty())
+    {
+        LOGW("Rules for pid={} is empty. Not performing injection", pid);
+        frida_device_resume(local_device, pid, nullptr, nullptr, nullptr);
+        return;
+    }
+    LOGD("attaching child pid={}", pid);
+    append(pid, js, true);
+    need_update = true;
+    update();
+    LOGD("child attach finished");
+}
+
+void Injector::on_session_detach(const FridaSession* session, FridaSessionDetachReason reason, FridaCrash* crash)
 {
 	gchar* reason_str = g_enum_to_string(FRIDA_TYPE_SESSION_DETACH_REASON, reason);
     LOGI("on_detached: reason = {}", reason_str);
@@ -254,7 +302,7 @@ void Injector::terminate()
 {
     if (g_main_loop_is_running(loop))
         g_main_loop_quit(loop);
-    list_lock.lock();
-    for (auto injector = injectors.begin(); injector != injectors.end(); injector = injectors.erase(injector));
-    list_lock.unlock();
+    std::lock_guard<std::mutex> lk(access_lock);
+    injectors.clear();
+    // for (auto injector = injectors.begin(); injector != injectors.end(); injector = injectors.erase(injector));
 }

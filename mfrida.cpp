@@ -17,11 +17,11 @@ extern logger_t logger;
 Injector injector;
 int signaled_to = 0;
 
-static std::string load_ts();
+static std::string load_js();
 
 void sigint_handler(int signo)
 {
-    // to ensure the subsequent SIGINT gets proper handling
+    // to ensure the subsequent sigint gets proper handling
     if (signaled_to == ELSE)
     {
         // allow for forcibly terminating
@@ -32,16 +32,45 @@ void sigint_handler(int signo)
         injector.update();
     }
     else {
-        LOGW("Got ambiguous signal, ignoring");
+        LOGW("got ambiguous signal, ignoring");
     }
-    signaled_to = ELSE;
+     signaled_to = ELSE;
 }
 
-void sigabort_handler(int signo)
+std::string get_rule_from_pid_desc(const pid_desc& desc)
 {
-    exit(-1);
+    string js = load_js();
+    return js;
 }
 
+pid_desc new_pid_desc(const pid_t pid, const pid_t ppid, const int argc, const char** argv, const char* path)
+{
+    pid_desc desc = { 0, 0, 0, {}, "" }; // all empty
+    if (pid == 0)
+    {
+        return desc; // return null
+    }
+    desc.pid = pid;
+    if (ppid != 0)
+        desc.ppid = ppid;
+
+    if (argc != 0 && argv != nullptr)
+    {
+        desc.argc = argc;
+        // desc.argv.reserve(argc);
+        for (int i = 0; i < argc; ++i)
+        {
+            desc.argv.emplace_back(argv[i]);
+        }
+    }
+
+    if (path != nullptr)
+    {
+        desc.path = path;
+    }
+
+    return desc;
+}
 
 void injection_begin(const Injector& injector)
 {
@@ -51,7 +80,7 @@ void injection_begin(const Injector& injector)
 int main(int argc, char *argv[])
 {
     std::vector<pid_t> pids;
-    std::string ts;
+    std::string js;
 
 	logger_init();
 
@@ -64,15 +93,14 @@ int main(int argc, char *argv[])
             LOGE("ignoring invalid pid: {}", fmt::ptr(argv[i]));
         }
     }
-
 	if (pids.empty()) {
         LOGE("No pid provided.");
         LOGE("Usage: {} pid1 pid2 pid3 ... ", argv[0]);
         return WRONG_PARAM;
     }
 
-    ts = load_ts();
-    if(ts.empty())
+    js = load_js();
+    if(js.empty())
     {
         LOGE("Unable to open typescript (or empty file content) located in {}", INSTRUMENT_TEMPLATE_PATH);
         return WRONG_PARAM;
@@ -93,9 +121,8 @@ int main(int argc, char *argv[])
     for (auto&& pid : pids)
     {
         // Injecting with multi-threading
-	    // std::this_thread::sleep_for(std::chrono::seconds(2));
 
-        injector.append(pid, ts);
+        injector.append(pid, js);
         injector.need_update = true;
 
         signaled_to = INJECTOR;
@@ -128,7 +155,7 @@ int main(int argc, char *argv[])
 	return SUCCESS;
 }
 
-static std::string load_ts() {
+static std::string load_js() {
     std::ifstream t(INSTRUMENT_TEMPLATE_PATH);
     std::string str;
 

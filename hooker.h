@@ -13,23 +13,27 @@ typedef struct {
 	string ts;
 } rule;
 
+FridaDevice* get_current_device();
+
 struct injection_instance
 {
 	pid_t pid;
 	string ts;
 	FridaSession* session = nullptr;
-	FridaScript* script = nullptr;
-	bool to_reattach = false;
-
+	FridaScript* script	  = nullptr;
+	bool to_reattach	  = false;
+	bool suspended		  = false;
 	void detach()
 	{
-		if (script)
+		const auto logger = get_current_logger();
+		// FridaDevice* device = get_current_device();
+		if (script && !frida_script_is_destroyed(script))
 		{
 			frida_script_unload_sync(script, nullptr, nullptr);
 			frida_unref(script);
 		}
 
-		if (session)
+		if (session && !frida_session_is_detached(session))
 		{
 			frida_session_detach_sync(session, nullptr, nullptr);
 			frida_unref(session);
@@ -40,6 +44,14 @@ struct injection_instance
 
 	~injection_instance()
 	{
+		if (suspended)
+		{
+			const auto logger = get_current_logger();
+			FridaDevice* device = get_current_device();
+			LOGD("Resuming suspended process with pid={}.", pid);
+			if (device)
+				frida_device_resume(device, pid, nullptr, nullptr, nullptr);
+		}
 		detach();
 	}
 };
@@ -52,19 +64,17 @@ public:
 	Injector() { need_update = false; } // do nothing
 
 	int init();
-	void append(const pid_t pid, const string& ts);
+	void append(const pid_t pid, const string& ts, bool suspended = false);
 	void attach();
 	int query(const pid_t pid);
 
 	void event_loop() const;
 	~Injector();
 
-	void on_session_detach(
-		const FridaSession* session,
-		FridaSessionDetachReason reason,
-		FridaCrash* crash
-	);
-	static void on_message(FridaScript* script, const gchar* message, GBytes* data);
+	void on_session_detach(const FridaSession* session, FridaSessionDetachReason reason, FridaCrash* crash);
+	void on_message(FridaScript* script, const gchar* message, GBytes* data);
+	void on_child_created(FridaDevice* device, FridaChild* child);
+
 	void terminate();
 	void update();
 
@@ -76,7 +86,7 @@ private:
 	GMainLoop* loop = nullptr;
 	FridaScriptOptions* options = nullptr;
 
-	std::mutex list_lock;
+	std::mutex access_lock;
 	list<injection_instance> injectors;
 	int remove_injector_by_session(const FridaSession* session);
 };

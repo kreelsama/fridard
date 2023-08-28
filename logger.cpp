@@ -23,3 +23,8 @@ int logger_init()
 	LOGD("debugging info enabled");
 	return true;
 }
+
+logger_t get_current_logger()
+{
+	return logger;
+}
