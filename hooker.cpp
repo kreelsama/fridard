@@ -79,10 +79,12 @@ int Injector::init() {
 void Injector::append(const pid_t pid, const string& js, bool suspended)
 {
     std::lock_guard<std::mutex> lk(access_lock);
+    injection_instance instance = { pid, js, nullptr, nullptr, false, suspended };
     // to be injected
     if (!query(pid)) {
-        injectors.push_back({ pid, js, nullptr, nullptr, false, suspended});
+        injectors.push_back(instance);
     }
+    instance.suspended = false; // NOT trigger resuming on garbage cleaning
 }
 
 void Injector::attach()
@@ -258,11 +260,16 @@ void Injector::on_child_created(FridaDevice* device, FridaChild* child)
         frida_device_resume(local_device, pid, nullptr, nullptr, nullptr);
         return;
     }
-    LOGD("attaching child pid={}", pid);
-    append(pid, js, true);
-    need_update = true;
-    update();
-    LOGD("child attach finished");
+    auto dummy_block = [this](const pid_t& pid, const string& js) {
+        LOGD("attaching child pid={}", pid);
+        append(pid, js, true);
+        need_update = true;
+        update();
+        LOGD("child attach finished");
+        };
+    std::thread t(dummy_block, pid, js);
+    if (t.joinable()) // avoid deadlocks
+        t.detach();
 }
 
 void Injector::on_session_detach(const FridaSession* session, FridaSessionDetachReason reason, FridaCrash* crash)
@@ -272,8 +279,13 @@ void Injector::on_session_detach(const FridaSession* session, FridaSessionDetach
     g_free(reason_str);
 
     // only remain attached normal program quitting
-    if(reason != FRIDA_SESSION_DETACH_REASON_APPLICATION_REQUESTED)
-		remove_injector_by_session(session);
+    if (reason != FRIDA_SESSION_DETACH_REASON_APPLICATION_REQUESTED) {
+        auto dummy_block = [this](const FridaSession* session) {remove_injector_by_session(session); };
+        std::thread t(dummy_block, session); // avoid deadlocks
+        if (t.joinable())
+            t.detach();
+        // remove_injector_by_session(session);
+    }
 }
 
 void Injector::on_message(FridaScript* script,
@@ -304,5 +316,4 @@ void Injector::terminate()
         g_main_loop_quit(loop);
     std::lock_guard<std::mutex> lk(access_lock);
     injectors.clear();
-    // for (auto injector = injectors.begin(); injector != injectors.end(); injector = injectors.erase(injector));
 }

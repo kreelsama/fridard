@@ -25,8 +25,6 @@ struct injection_instance
 	bool suspended		  = false;
 	void detach()
 	{
-		const auto logger = get_current_logger();
-		// FridaDevice* device = get_current_device();
 		if (script && !frida_script_is_destroyed(script))
 		{
 			frida_script_unload_sync(script, nullptr, nullptr);
@@ -48,7 +46,7 @@ struct injection_instance
 		{
 			const auto logger = get_current_logger();
 			FridaDevice* device = get_current_device();
-			LOGD("Resuming suspended process with pid={}.", pid);
+			LOGW("Resuming suspended process with pid={}.", pid);
 			if (device)
 				frida_device_resume(device, pid, nullptr, nullptr, nullptr);
 		}
