@@ -15,23 +15,38 @@ static void  on_detached_wrapper(
     FridaCrash* crash,
     gpointer user_data)
 {
-    auto injector = reinterpret_cast<Injector*>(user_data);
-    injector->on_session_detach(session, reason, crash);
+    auto injector = static_cast<Injector*>(user_data);
+    // reason for creating a new thread for on-detach and on-child-added: avoid deadlocks
+    std::thread t(&Injector::on_session_detach, injector, session, reason, crash);
+    if (t.joinable())
+        t.detach();
 }
 
 static void on_message_wrapper(FridaScript* script,
     const gchar* message,
     GBytes* data,
     gpointer user_data) {
-    auto injector = reinterpret_cast<Injector*>(user_data);
+    auto injector = static_cast<Injector*>(user_data);
     injector->on_message(script, message, data);
 }
 
-static void on_child_added_wrapper(FridaDevice* device, FridaChild* child_process, gpointer user_data)
+static void on_child_added_wrapper(FridaDevice* device, FridaChild* child, gpointer user_data)
 {
-    LOGD("Enter child created");
-    auto injector = reinterpret_cast<Injector*>(user_data);
-    injector->on_child_created(device, child_process);
+    const pid_t pid = frida_child_get_pid(child);
+    const pid_t ppid = frida_child_get_parent_pid(child);
+    gint argc;
+    gchar** argv = frida_child_get_argv(child, &argc);
+    const gchar* path = frida_child_get_path(child);
+
+    auto desc = new_pid_desc(pid, ppid, argc, (const char**)argv, path);
+    string js = get_rule_from_pid_desc(desc);
+
+    LOGI("Trying to attach child process PID={}, path={}", pid, desc.path);
+
+    auto injector = static_cast<Injector*>(user_data);
+    std::thread t(&Injector::instrument_by_pid, injector, pid, js, true);
+    if (t.joinable())
+        t.detach();
 }
 
 int Injector::init() {
@@ -76,21 +91,9 @@ int Injector::init() {
         return NO_LOCAL_DEVICE;
 }
 
-void Injector::append(const pid_t pid, const string& js, bool suspended)
-{
-    std::lock_guard<std::mutex> lk(access_lock);
-    injection_instance instance = { pid, js, nullptr, nullptr, false, suspended };
-    // to be injected
-    if (!query(pid)) {
-        injectors.push_back(instance);
-    }
-    instance.suspended = false; // NOT trigger resuming on garbage cleaning
-}
-
 void Injector::attach()
 {
     GError* error;
-    decltype(injectors) reattach_processes;
     std::lock_guard<std::mutex> lk(access_lock);
     for (auto&& injector = injectors.begin(); injector != injectors.end(); /*increment inside*/) 
     {
@@ -165,7 +168,8 @@ void Injector::attach()
 
 int Injector::query(const pid_t pid)
 {
-    for (const auto& injector : injectors)
+    std::lock_guard<std::mutex> lk(access_lock);
+    for (auto&& injector : injectors)
     {
         if (injector.pid == pid) {
             return true;
@@ -196,6 +200,17 @@ Injector::~Injector() {
     frida_shutdown();
 }
 
+void Injector::on_session_detach(const FridaSession* session, FridaSessionDetachReason reason, FridaCrash* crash)
+{
+    gchar* reason_str = g_enum_to_string(FRIDA_TYPE_SESSION_DETACH_REASON, reason);
+    LOGI("on_detached: reason = {}", reason_str);
+    g_free(reason_str);
+
+    // only remain attached normal program quitting
+    if (reason != FRIDA_SESSION_DETACH_REASON_APPLICATION_REQUESTED)
+        remove_injector_by_session(session);
+}
+
 void Injector::update()
 {
     if (!need_update) {
@@ -209,13 +224,14 @@ void Injector::update()
 
 void Injector::reattach(const pid_t pid, const string& ts)
 {
-    std::lock_guard<std::mutex> lk(access_lock);
     if (!query(pid)) {
+        std::lock_guard<std::mutex> lk(access_lock);
         LOGW("Process with PID={} has no injection instance, attaching now.", pid);
         injectors.push_back( {pid, ts, nullptr, nullptr, false, false} );
     }
     else
     {
+        std::lock_guard<std::mutex> lk(access_lock);
         for (auto&& injector = injectors.begin(); injector != injectors.end(); ++injector)
         {
 	        if(injector->pid == pid)
@@ -225,6 +241,8 @@ void Injector::reattach(const pid_t pid, const string& ts)
 	        }
         }
     }
+    need_update = true;
+    update();
 }
 
 int Injector::remove_injector_by_session(const FridaSession* session)
@@ -242,55 +260,32 @@ int Injector::remove_injector_by_session(const FridaSession* session)
     return false;
 }
 
-void Injector::on_child_created(FridaDevice* device, FridaChild* child)
+bool Injector::instrument_by_pid(pid_t pid, string js, bool suspended)
 {
-    const pid_t pid = frida_child_get_pid(child);
-    const pid_t ppid = frida_child_get_parent_pid(child);
-    gint argc;
-    gchar** argv = frida_child_get_argv(child, &argc);
-    const gchar* path = frida_child_get_path(child);
-
-    auto desc = new_pid_desc(pid, ppid, argc, (const char**) argv, path);
-
-    string js = get_rule_from_pid_desc(desc);
-
-    if(js.empty())
+    if (js.empty())
     {
         LOGW("Rules for pid={} is empty. Not performing injection", pid);
-        frida_device_resume(local_device, pid, nullptr, nullptr, nullptr);
-        return;
+        if(suspended) 
+            frida_device_resume(local_device, pid, nullptr, nullptr, nullptr);
+        return false;
     }
-    auto dummy_block = [this](const pid_t& pid, const string& js) {
-        LOGD("attaching child pid={}", pid);
-        append(pid, js, true);
-        need_update = true;
-        update();
-        LOGD("child attach finished");
-        };
-    std::thread t(dummy_block, pid, js);
-    if (t.joinable()) // avoid deadlocks
-        t.detach();
+
+    injection_instance instance = { pid, js, nullptr, nullptr, false, suspended };
+
+    if (!query(pid)) {
+        std::lock_guard<std::mutex> lk(access_lock);
+        injectors.push_back(instance);
+    }
+
+    need_update = true;
+    update();
+
+    instance.suspended = false; // to avoid early resuming triggered by garbage collection
+
+    return query(pid);
 }
 
-void Injector::on_session_detach(const FridaSession* session, FridaSessionDetachReason reason, FridaCrash* crash)
-{
-	gchar* reason_str = g_enum_to_string(FRIDA_TYPE_SESSION_DETACH_REASON, reason);
-    LOGI("on_detached: reason = {}", reason_str);
-    g_free(reason_str);
-
-    // only remain attached normal program quitting
-    if (reason != FRIDA_SESSION_DETACH_REASON_APPLICATION_REQUESTED) {
-        auto dummy_block = [this](const FridaSession* session) {remove_injector_by_session(session); };
-        std::thread t(dummy_block, session); // avoid deadlocks
-        if (t.joinable())
-            t.detach();
-        // remove_injector_by_session(session);
-    }
-}
-
-void Injector::on_message(FridaScript* script,
-    const gchar* message,
-    GBytes* data)
+void Injector::on_message(FridaScript* script, const gchar* message, GBytes* data)
 {
 	JsonParser* parser = json_parser_new();
     json_parser_load_from_data(parser, message, -1, nullptr);

@@ -122,11 +122,13 @@ int main(int argc, char *argv[])
     {
         // Injecting with multi-threading
 
-        injector.append(pid, js);
-        injector.need_update = true;
+        /*injector.append(pid, js);
+        injector.need_update = true;*/
 
-        signaled_to = INJECTOR;
-        raise(SIGINT);
+        injector.instrument_by_pid(pid, js);
+
+        // signaled_to = INJECTOR;
+        // raise(SIGINT);
     }
 
     // perform reattaching all processes

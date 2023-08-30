@@ -62,7 +62,6 @@ public:
 	Injector() { need_update = false; } // do nothing
 
 	int init();
-	void append(const pid_t pid, const string& ts, bool suspended = false);
 	void attach();
 	int query(const pid_t pid);
 
@@ -71,7 +70,9 @@ public:
 
 	void on_session_detach(const FridaSession* session, FridaSessionDetachReason reason, FridaCrash* crash);
 	void on_message(FridaScript* script, const gchar* message, GBytes* data);
-	void on_child_created(FridaDevice* device, FridaChild* child);
+	// void on_child_created(pid_t pid, string js);
+
+	bool instrument_by_pid(pid_t pid, string js, bool suspended = false);
 
 	void terminate();
 	void update();
